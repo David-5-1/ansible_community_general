@@ -101,6 +101,17 @@ EXAMPLES = """
     msg: "A record found {{ item }}"
   loop: "{{ query('community.general.dig', 'example.org.', 'example.com.', 'gmail.com.') }}"
 
+- name: Lookup multiple names and qtypes at once
+  ansible.builtin.debug:
+    msg: "A record found {{ item }}"
+  loop: "{{ query('community.general.dig', 'example.org./A', 'example.org./AAAA', 'example.com./A') }}"
+
+- name: Please do not do that
+  ansible.builtin.debug:
+    msg: "Please do not do that: {{ item }}"
+  loop: "{{ query('community.general.dig', 'example.org./A', 'example.org.', 'qtype=MX', 'example.net.', qtype='SOA') }}"
+  # Will get A for example.org. and MX for example.org. and example.net.
+
 - name: Lookup multiple names at once (from list variable)
   ansible.builtin.debug:
     msg: "A record found {{ item }}"
@@ -325,7 +336,7 @@ class LookupModule(LookupBase):
         myres.use_edns(0, ednsflags=dns.flags.DO, payload=edns_size)
 
         domains = []
-        qtype = self.get_option('qtype')
+        default_qtype = self.get_option('qtype')
         flat = self.get_option('flat')
         fail_on_error = self.get_option('fail_on_error')
         real_empty = self.get_option('real_empty')
@@ -336,6 +347,7 @@ class LookupModule(LookupBase):
         myres.retry_servfail = self.get_option('retry_servfail')
 
         for t in terms:
+            qtype = None
             if t.startswith('@'):       # e.g. "@10.0.1.2,192.0.2.1" is ok.
                 nsset = t[1:].split(',')
                 for ns in nsset:
@@ -361,7 +373,7 @@ class LookupModule(LookupBase):
                     pass
 
                 if opt == 'qtype':
-                    qtype = arg.upper()
+                    default_qtype = arg.upper()
                 elif opt == 'flat':
                     flat = int(arg)
                 elif opt == 'class':
@@ -379,35 +391,30 @@ class LookupModule(LookupBase):
                 continue
 
             if '/' in t:
-                try:
-                    domain, qtype = t.split('/')
-                    domains.append(domain)
-                except Exception:
-                    domains.append(t)
-            else:
-                domains.append(t)
+                t, qtype = t.split('/', 1)
+            domains.append((t, qtype))
 
-        # print "--- domain = {0} qtype={1} rdclass={2}".format(domain, qtype, rdclass)
-
-        if qtype.upper() == 'PTR':
-            reversed_domains = []
-            for domain in domains:
+        def reverse_domains_for_ptr_filter(domain, qtype):
+            if (qtype or default_qtype).upper() == 'PTR':
                 try:
                     n = dns.reversename.from_address(domain)
-                    reversed_domains.append(n.to_text())
+                    return n.to_text(), qtype
                 except dns.exception.SyntaxError:
                     pass
                 except Exception as e:
                     raise AnsibleError("dns.reversename unhandled exception %s" % to_native(e))
-            domains = reversed_domains
+            return domain, qtype
+        domains = [reverse_domains_for_ptr_filter(*i) for i in domains]
 
         if len(domains) > 1:
             real_empty = True
 
         ret = []
 
-        for domain in domains:
+        for domain, qtype in domains:
             try:
+                if qtype is None:
+                    qtype = default_qtype
                 answers = myres.query(domain, qtype, rdclass=rdclass)
                 for rdata in answers:
                     s = rdata.to_text()
